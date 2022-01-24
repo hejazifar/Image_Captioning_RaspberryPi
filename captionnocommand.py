@@ -1,14 +1,8 @@
-# LIBRARIES USED
-import json
 import torch
-import torch.nn.utils.prune as prune
 import torch.nn.functional as F
-import torch_pruning as tp
-import torchvision.models as models
-from torchsummary import summary
-import time
-#from caption.py
+import torch.nn.utils.prune as prune
 import numpy as np
+import json
 import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
@@ -16,18 +10,12 @@ import skimage.transform
 import argparse
 #from scipy.misc import imread, imresize ##########depracated
 from imageio import imread
-from skimage.transform import resize
+from skimage.transform import resize as imresize
 from PIL import Image
-import torch.quantization 
 
-# MACROS
-img = r"./img_test3.jpeg"
-word_map = r"./WORDMAP_coco_5_cap_per_img_5_min_word_freq.json"
-model = r"./BEST_checkpoint_coco_5_cap_per_img_5_min_word_freq.pth.tar"
-beam_size = 5
-device = "cpu"
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# INFERENCE FUNCTIONS
+
 def caption_image_beam_search(encoder, decoder, image_path, word_map, beam_size=3):
     """
     Reads an image and captions it with beam search.
@@ -39,16 +27,16 @@ def caption_image_beam_search(encoder, decoder, image_path, word_map, beam_size=
     :param beam_size: number of sequences to consider at each decode-step
     :return: caption, weights for visualization
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     k = beam_size
     vocab_size = len(word_map)
-    tic = time.time()
+
     # Read image and process
     img = imread(image_path)
     if len(img.shape) == 2:
         img = img[:, :, np.newaxis]
         img = np.concatenate([img, img, img], axis=2)
-   # img = imresize(img, (256, 256))  #- comment out this line since it always generates the same caption
+    # img = imresize(img, (256, 256))  - comment out this line since it always generates the same caption
     img = img.transpose(2, 0, 1)
     img = img / 255.
     img = torch.FloatTensor(img).to(device)
@@ -162,101 +150,83 @@ def caption_image_beam_search(encoder, decoder, image_path, word_map, beam_size=
     i = complete_seqs_scores.index(max(complete_seqs_scores))
     seq = complete_seqs[i]
     alphas = complete_seqs_alpha[i]
-    print('Elapsed time for inference:', time.time()-tic, '\n')
+
     return seq, alphas
 
 
+def visualize_att(image_path, seq, alphas, rev_word_map, smooth=True):
+    """
+    Visualizes caption with weights at every word.
 
+    Adapted from paper authors' repo: https://github.com/kelvinxu/arctic-captions/blob/master/alpha_visualization.ipynb
 
+    :param image_path: path to image that has been captioned
+    :param seq: caption
+    :param alphas: weights
+    :param rev_word_map: reverse word mapping, i.e. ix2word
+    :param smooth: smooth weights?
+    """
+    image = Image.open(image_path)
+    image = image.resize([14 * 24, 14 * 24], Image.LANCZOS)
 
-def inference(encoder, decoder, img, word_map=word_map, beam_size=beam_size):
-    seq, alphas = caption_image_beam_search(
-        encoder, decoder, img, word_map, beam_size)
-    alphas = torch.FloatTensor(alphas)
     words = [rev_word_map[ind] for ind in seq]
-    sentence = ""
-    for word in words:
-        sentence = sentence + " " + word
-    return sentence
 
-# ENCODER CLASS
+    for t in range(len(words)):
+        if t > 50:
+            break
+        plt.subplot(int(np.ceil(len(words) / 5.)), 5, t + 1)    ### added int func
 
-
-class Encoder(torch.nn.Module):
-    """
-    Encoder.
-    """
-
-    def __init__(self, encoded_image_size=14):
-        super(Encoder, self).__init__()
-        self.enc_image_size = encoded_image_size
-
-        # resnet = torchvision.models.resnet101(pretrained=True)  # pretrained ImageNet ResNet-101
-        #resnet = resnext101_32x8d()
-        resnet = models.resnet101()
-        # resnet.load_state_dict(torch.load("resnet101-2.pth"))
-
-        # Remove linear and pool layers (since we're not doing classification)
-        modules = list(resnet.children())[:-2]
-        self.resnet = torch.nn.Sequential(*modules)
-
-        # Resize image to fixed size to allow input images of variable size
-        self.adaptive_pool = torch.nn.AdaptiveAvgPool2d(
-            (encoded_image_size, encoded_image_size))
-
-        self.fine_tune()
-        #self.qconfig = quantization.get_default_qconfig('fbgemm')
-        # set the qengine to control weight packing
-        #torch.backends.quantized.engine = 'fbgemm'
-
-    def forward(self, images):
-        """
-        Forward propagation.
-
-        :param images: images, a tensor of dimensions (batch_size, 3, image_size, image_size)
-        :return: encoded images
-        """
-#         images = quantization.QuantStub(images)
-        #out = quantization.QuantStub(images)
-        # (batch_size, 2048, image_size/32, image_size/32)
-        out = self.resnet(images)
-        #out = quantization.DeQuantStub(out)
-        # (batch_size, 2048, encoded_image_size, encoded_image_size)
-        out = self.adaptive_pool(out)
-        # (batch_size, encoded_image_size, encoded_image_size, 2048)
-        out = out.permute(0, 2, 3, 1)
-#         out = quantization.DeQuantStub(out)
-        return out
-
-    def fine_tune(self, fine_tune=True):
-        """
-        Allow or prevent the computation of gradients for convolutional blocks 2 through 4 of the encoder.
-
-        :param fine_tune: Allow?
-        """
-        for p in self.resnet.parameters():
-            p.requires_grad = False
-        # If fine-tuning, only fine-tune convolutional blocks 2 through 4
-        for c in list(self.resnet.children())[5:]:
-            for p in c.parameters():
-                p.requires_grad = fine_tune
+        plt.text(0, 1, '%s' % (words[t]), color='black', backgroundcolor='white', fontsize=12)
+        plt.imshow(image)
+        current_alpha = alphas[t, :]
+        if smooth:
+            alpha = skimage.transform.pyramid_expand(current_alpha.numpy(), upscale=24, sigma=8)
+        else:
+            alpha = skimage.transform.resize(current_alpha.numpy(), [14 * 24, 14 * 24])
+        if t == 0:
+            plt.imshow(alpha, alpha=0)
+        else:
+            plt.imshow(alpha, alpha=0.8)
+        plt.set_cmap(cm.Greys_r)
+        plt.axis('off')
+    plt.show()
 
 
-# Loading the models
-myencoder = Encoder()
-myencoder = myencoder.to(device)
-myencoder.eval()
-myencoder = torch.load("EncoderOrig.pth")
-decoder = torch.load("DecoderOrig.pth")
+if __name__ == '__main__':
+    #parser = argparse.ArgumentParser(description='Show, Attend, and Tell - Tutorial - Generate Caption')
 
-# Load word map (word2ix)
-with open(word_map, 'r') as j:
-    word_map = json.load(j)
-rev_word_map = {v: k for k, v in word_map.items()}  # ix2word
+    #parser.add_argument('--img', '-i', help='path to image')
+    #parser.add_argument('--model', '-m', help='path to model')
+    #parser.add_argument('--word_map', '-wm', help='path to word map JSON')
+    #parser.add_argument('--beam_size', '-b', default=5, type=int, help='beam size for beam search')
+    #parser.add_argument('--dont_smooth', dest='smooth', action='store_false', help='do not smooth alpha overlay')
 
-while(True):
-    try:
-        myimg = input("image path: ")
-        print(inference(myencoder, decoder, myimg, word_map, beam_size))
-    except(KeyboardInterrupt):
-        break
+    #args = parser.parse_args()
+
+    img_dir = 'img1.jpg'
+    word_map = 'WORDMAP_coco_5_cap_per_img_5_min_word_freq.json'
+    model = 'BEST_checkpoint_coco_5_cap_per_img_5_min_word_freq.pth.tar'
+    beam_size = 4
+    # Load model
+    checkpoint = torch.load(model, map_location=str(device))
+    print(checkpoint)
+    decoder = checkpoint['decoder']
+    decoder = decoder.to(device)
+    decoder.eval()
+    encoder = checkpoint['encoder']
+    encoder = encoder.to(device)
+    print(list(encoder.named_parameters()))
+    prune.random_unstructured(encoder, name="resnet.0.weight", amount=0.98)
+    encoder.eval()
+
+    # Load word map (word2ix)
+    with open(word_map, 'r') as j:
+        word_map = json.load(j)
+    rev_word_map = {v: k for k, v in word_map.items()}  # ix2word
+
+    # Encode, decode with attention and beam search
+    seq, alphas = caption_image_beam_search(encoder, decoder, img_dir, word_map, beam_size)
+    alphas = torch.FloatTensor(alphas)
+
+    # Visualize caption and attention of best sequence
+    visualize_att(img_dir, seq, alphas, rev_word_map, args.smooth)

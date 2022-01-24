@@ -19,14 +19,14 @@ from imageio import imread
 from skimage.transform import resize
 from PIL import Image
 import torch.quantization 
-
+import ResnetQuant
 # MACROS
 img = r"./img_test3.jpeg"
 word_map = r"./WORDMAP_coco_5_cap_per_img_5_min_word_freq.json"
 model = r"./BEST_checkpoint_coco_5_cap_per_img_5_min_word_freq.pth.tar"
 beam_size = 5
 device = "cpu"
-
+torch.backends.quantized.engine = "qnnpack"
 # INFERENCE FUNCTIONS
 def caption_image_beam_search(encoder, decoder, image_path, word_map, beam_size=3):
     """
@@ -42,7 +42,7 @@ def caption_image_beam_search(encoder, decoder, image_path, word_map, beam_size=
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     k = beam_size
     vocab_size = len(word_map)
-    tic = time.time()
+
     # Read image and process
     img = imread(image_path)
     if len(img.shape) == 2:
@@ -56,7 +56,8 @@ def caption_image_beam_search(encoder, decoder, image_path, word_map, beam_size=
                                      std=[0.229, 0.224, 0.225])
     transform = transforms.Compose([normalize])
     image = transform(img)  # (3, 256, 256)
-
+    
+    tic = time.time()
     # Encode
     image = image.unsqueeze(0)  # (1, 3, 256, 256)
     encoder_out = encoder(image)  # (1, enc_image_size, enc_image_size, encoder_dim)
@@ -158,11 +159,10 @@ def caption_image_beam_search(encoder, decoder, image_path, word_map, beam_size=
         if step > 50:
             break
         step += 1
-
+    print('Elapsed time for inference:', time.time()-tic, '\n')
     i = complete_seqs_scores.index(max(complete_seqs_scores))
     seq = complete_seqs[i]
     alphas = complete_seqs_alpha[i]
-    print('Elapsed time for inference:', time.time()-tic, '\n')
     return seq, alphas
 
 
@@ -180,8 +180,6 @@ def inference(encoder, decoder, img, word_map=word_map, beam_size=beam_size):
     return sentence
 
 # ENCODER CLASS
-
-
 class Encoder(torch.nn.Module):
     """
     Encoder.
@@ -191,23 +189,24 @@ class Encoder(torch.nn.Module):
         super(Encoder, self).__init__()
         self.enc_image_size = encoded_image_size
 
-        # resnet = torchvision.models.resnet101(pretrained=True)  # pretrained ImageNet ResNet-101
-        #resnet = resnext101_32x8d()
-        resnet = models.resnet101()
-        # resnet.load_state_dict(torch.load("resnet101-2.pth"))
+        #resnet = torchvision.models.resnet101(pretrained=True)  # pretrained ImageNet ResNet-101
+        #resnet = models.resnet101()
+        resnet = ResnetQuant.resnet101()
+        #resnet.load_state_dict(torch.load("resnet101-2.pth"))
 
         # Remove linear and pool layers (since we're not doing classification)
         modules = list(resnet.children())[:-2]
         self.resnet = torch.nn.Sequential(*modules)
 
         # Resize image to fixed size to allow input images of variable size
-        self.adaptive_pool = torch.nn.AdaptiveAvgPool2d(
-            (encoded_image_size, encoded_image_size))
+        self.adaptive_pool = torch.nn.AdaptiveAvgPool2d((encoded_image_size, encoded_image_size))
 
         self.fine_tune()
-        #self.qconfig = quantization.get_default_qconfig('fbgemm')
+        self.qconfig = torch.quantization.get_default_qconfig('qnnpack')
         # set the qengine to control weight packing
-        #torch.backends.quantized.engine = 'fbgemm'
+        torch.backends.quantized.engine = 'qnnpack'
+        self.quant = torch.quantization.QuantStub()
+        self.dequant = torch.quantization.DeQuantStub()
 
     def forward(self, images):
         """
@@ -216,15 +215,11 @@ class Encoder(torch.nn.Module):
         :param images: images, a tensor of dimensions (batch_size, 3, image_size, image_size)
         :return: encoded images
         """
-#         images = quantization.QuantStub(images)
-        #out = quantization.QuantStub(images)
-        # (batch_size, 2048, image_size/32, image_size/32)
-        out = self.resnet(images)
-        #out = quantization.DeQuantStub(out)
-        # (batch_size, 2048, encoded_image_size, encoded_image_size)
-        out = self.adaptive_pool(out)
-        # (batch_size, encoded_image_size, encoded_image_size, 2048)
-        out = out.permute(0, 2, 3, 1)
+        images = self.quant(images)
+        out = self.resnet(images)  # (batch_size, 2048, image_size/32, image_size/32)
+        out = self.dequant(out)
+        out = self.adaptive_pool(out)  # (batch_size, 2048, encoded_image_size, encoded_image_size)
+        out = out.permute(0, 2, 3, 1)  # (batch_size, encoded_image_size, encoded_image_size, 2048)
 #         out = quantization.DeQuantStub(out)
         return out
 
@@ -241,22 +236,54 @@ class Encoder(torch.nn.Module):
             for p in c.parameters():
                 p.requires_grad = fine_tune
 
+# QUANTIZATION FUNCTION
+def quantize_my_model(model):
+    # set the qconfig for PTQ
+    model.qconfig = torch.quantization.get_default_qconfig('qnnpack')
+    # set the qengine to control weight packing
+    torch.backends.quantized.engine = 'qnnpack'
+    # put model in eval mode
+    model.eval()
+    torch.quantization.prepare(model, inplace=True)
+    torch.quantization.convert(model, inplace=True)
+
 
 # Loading the models
+
+# Pruned Encoder
 myencoder = Encoder()
+myencoder = torch.load('EncoderPruned.pth')
 myencoder = myencoder.to(device)
 myencoder.eval()
-myencoder = torch.load("EncoderOrig.pth")
-decoder = torch.load("DecoderOrig.pth")
+#Quantized Encode
+#myencoder = Encoder()
+#myencoder = myencoder.to(device)
+#myencoder.eval()
+#quantize_my_model(myencoder)
+#myencoder.load_state_dict(torch.load("EncoderQuantized_with_script.pth",device))
+#myencoder.eval()
+decoder = torch.load("DecoderQuantized.pth")
+
 
 # Load word map (word2ix)
 with open(word_map, 'r') as j:
     word_map = json.load(j)
 rev_word_map = {v: k for k, v in word_map.items()}  # ix2word
 
-while(True):
-    try:
-        myimg = input("image path: ")
-        print(inference(myencoder, decoder, myimg, word_map, beam_size))
-    except(KeyboardInterrupt):
-        break
+#summary(myencoder,(3,256,256))
+#summary(decoder,(14,14,2048), word_map.keys() , beam_size)
+
+for i in range(4):
+    myimg = 'img2.jpg'
+    print(myimg, ':\n',inference(myencoder, decoder, myimg, word_map, beam_size))
+    myimg = 'img3.jpg'
+    print(myimg, ':\n',inference(myencoder, decoder, myimg, word_map, beam_size))
+    myimg = 'img4.jpg'
+    print(myimg, ':\n',inference(myencoder, decoder, myimg, word_map, beam_size))
+    myimg = 'img5.jpg'
+    print(myimg, ':\n',inference(myencoder, decoder, myimg, word_map, beam_size))
+    myimg = 'img7.png'
+    print(myimg, ':\n',inference(myencoder, decoder, myimg, word_map, beam_size))
+    myimg = 'img8.jpg'
+    print(myimg, ':\n',inference(myencoder, decoder, myimg, word_map, beam_size))
+
