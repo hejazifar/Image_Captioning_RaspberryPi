@@ -10,3 +10,16 @@ pruned encoder, normal models.
 In case you want to change the models you gave to change the path in execute files, and then you can run the execute files.
 
 For running this project you need to have a camera, you can also use this project to caption an image from the internet but for that you need to do some modifications.
+
+
+After adjusting the paths and choosing the models of choice the program to execute is execute_double.
+
+**execute_double.py**
+
+1) At the beginning you get a welcoming message.
+2) Next you are prompted to choose between doing image captioning or video captioning.
+  i) If you chose image captioning you can enter 'c' or 'C' to capture an image from the PiCamera and you should get the captionining sentence along with a describing picture.
+  ii) If you chose video captioning you should enter a positive integer and later you should get a paragraph describing what was happening in front of the PiCamera with 
+  a number of sentences equal to the input integer
+3) You can enter 'x' or 'X' to escape from the current mini program and go to point 2).
+4) Press ctrl + 'c' to exit the program definitely.
