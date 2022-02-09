@@ -4,8 +4,7 @@ this repository: https://github.com/sgrvinod/a-PyTorch-Tutorial-to-Image-Caption
 
 To make the project work you need to download the models from the following link: https://drive.google.com/drive/folders/1U9LJyL4YBXLel-nP237_6U8ypZHd4oxH?usp=sharing
 
-In order to run the model you need to choose among the offering models which one you want to use for inferencing an image. The options are quantized encoder, quantized decoder
-pruned encoder, normal models.
+In order to run the model you need to choose among the offering models which one you want to use for inferencing an image. The options are quantized, pruned, or normal models.
 
 In case you want to change the models you gave to change the path in execute files, and then you can run the execute files.
 
