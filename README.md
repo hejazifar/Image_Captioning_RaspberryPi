@@ -6,7 +6,7 @@ To make the project work you need to download the models from the following link
 
 In order to run the model you need to choose among the offering models which one you want to use for inferencing an image. The options are quantized, pruned, or normal models.
 
-In case you want to change the models you gave to change the path in execute files, and then you can run the execute files.
+In case you want to change the models you gave to change the path in execute files, and then you can run the execute python files.
 
 For running this project you need to have a camera, you can also use this project to caption an image from the internet but for that you need to do some modifications.
 
