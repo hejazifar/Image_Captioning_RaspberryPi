@@ -100,9 +100,9 @@ class Bottleneck(nn.Module):
         self.stride = stride
 
         # Gjergji quantization
-        self.qconfig = quantization.get_default_qconfig('qnnpack')
+        self.qconfig = quantization.get_default_qconfig('fbgemm')
         # set the qengine to control weight packing
-        torch.backends.quantized.engine = 'qnnpack'
+        torch.backends.quantized.engine = 'fbgemm'
         self.quant = quantization.QuantStub()
         self.dequant = quantization.DeQuantStub()
         self.f_add = nn.quantized.FloatFunctional()

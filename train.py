@@ -9,9 +9,10 @@ from models import Encoder, DecoderWithAttention
 from datasets import *
 from utils import *
 from nltk.translate.bleu_score import corpus_bleu
+import torch.nn.utils.prune as prune
 
 # Data parameters
-data_folder = '/media/ssd/caption data'  # folder with data files saved by create_input_files.py
+data_folder = './Dataset/Output/'  # folder with data files saved by create_input_files.py
 data_name = 'coco_5_cap_per_img_5_min_word_freq'  # base name shared by data files
 
 # Model parameters
@@ -24,19 +25,34 @@ cudnn.benchmark = True  # set to true only if inputs to model are fixed size; ot
 
 # Training parameters
 start_epoch = 0
-epochs = 120  # number of epochs to train for (if early stopping is not triggered)
+epochs = 90  # number of epochs to train for (if early stopping is not triggered)
 epochs_since_improvement = 0  # keeps track of number of epochs since there's been an improvement in validation BLEU
-batch_size = 32
-workers = 1  # for data-loading; right now, only 1 works with h5py
-encoder_lr = 1e-4  # learning rate for encoder if fine-tuning
+batch_size = 16
+workers = 0  # for data-loading; right now, only 1 works with h5py
+encoder_lr = 1e-4 # learning rate for encoder if fine-tuning - was 1e-4
 decoder_lr = 4e-4  # learning rate for decoder
 grad_clip = 5.  # clip gradients at an absolute value of
 alpha_c = 1.  # regularization parameter for 'doubly stochastic attention', as in the paper
 best_bleu4 = 0.  # BLEU-4 score right now
 print_freq = 100  # print training/validation stats every __ batches
-fine_tune_encoder = False  # fine-tune encoder?
-checkpoint = None  # path to checkpoint, None if none
+fine_tune_encoder = True  # fine-tune encoder?
+checkpoint = 'C:/Users/Dogukan/Desktop/dogukan/TUMMSCE/ATCE/image-captioning-on-pytorch-master/BEST_checkpoint_coco_5_cap_per_img_5_min_word_freq.pth.tar'  # path to checkpoint, None if none
 
+def prune_my_encoder(encoder):
+    for name, module in encoder.named_modules():
+        if isinstance(module, torch.nn.Conv2d):
+            prune.ln_structured(module, name="weight", amount=0.05, n=2, dim=0)
+            prune.remove(module, 'weight')
+        elif isinstance(module, torch.nn.Linear):
+            prune.ln_structured(module, name="weight", amount=0.05, n=2, dim=0)
+            prune.remove(module, 'weight')
+    eps = 1e-3
+    with torch.no_grad():
+        for name, module in encoder.named_modules():
+            if isinstance(module, torch.nn.Conv2d):
+                module.weight[abs(module.weight)<eps] = 0
+            elif isinstance(module, torch.nn.Linear):
+                module.weight[abs(module.weight)<eps] = 0
 
 def main():
     """
@@ -70,9 +86,19 @@ def main():
         epochs_since_improvement = checkpoint['epochs_since_improvement']
         best_bleu4 = checkpoint['bleu-4']
         decoder = checkpoint['decoder']
+        #decoder = torch.quantization.quantize_dynamic(decoder, {torch.nn.LSTM, torch.nn.Linear}, dtype=torch.qint8)
         decoder_optimizer = checkpoint['decoder_optimizer']
         encoder = checkpoint['encoder']
-        encoder_optimizer = checkpoint['encoder_optimizer']
+        #encoder_optimizer = checkpoint['encoder_optimizer']
+        #encoder_optimizer = torch.optim.Adam(params=filter(lambda p: p.requires_grad, encoder.parameters()),
+        #                                     lr=encoder_lr)
+        ############
+        encoder = torch.load('EncoderPrunedForEval.pth')
+        #encoder = PrunedCheckpoint['encoder']
+        #decoder = PrunedCheckpoint['decoder']
+        ############
+
+        encoder_optimizer = None
         if fine_tune_encoder is True and encoder_optimizer is None:
             encoder.fine_tune(fine_tune_encoder)
             encoder_optimizer = torch.optim.Adam(params=filter(lambda p: p.requires_grad, encoder.parameters()),
@@ -101,8 +127,8 @@ def main():
         # Decay learning rate if there is no improvement for 8 consecutive epochs, and terminate training after 20
         if epochs_since_improvement == 20:
             break
-        if epochs_since_improvement > 0 and epochs_since_improvement % 8 == 0:
-            adjust_learning_rate(decoder_optimizer, 0.8)
+        if epochs_since_improvement > 0: #and epochs_since_improvement % 4 == 0:
+            #adjust_learning_rate(decoder_optimizer, 0.8)
             if fine_tune_encoder:
                 adjust_learning_rate(encoder_optimizer, 0.8)
 
@@ -148,7 +174,8 @@ def train(train_loader, encoder, decoder, criterion, encoder_optimizer, decoder_
     :param epoch: epoch number
     """
 
-    decoder.train()  # train mode (dropout and batchnorm is used)
+    #decoder.train()  # train mode (dropout and batchnorm is used)
+    decoder.eval()
     encoder.train()
 
     batch_time = AverageMeter()  # forward prop. + back prop. time
@@ -176,8 +203,8 @@ def train(train_loader, encoder, decoder, criterion, encoder_optimizer, decoder_
 
         # Remove timesteps that we didn't decode at, or are pads
         # pack_padded_sequence is an easy trick to do this
-        scores, _ = pack_padded_sequence(scores, decode_lengths, batch_first=True)
-        targets, _ = pack_padded_sequence(targets, decode_lengths, batch_first=True)
+        scores, *_ = pack_padded_sequence(scores, decode_lengths, batch_first=True)    # i added a star
+        targets, *_ = pack_padded_sequence(targets, decode_lengths, batch_first=True)
 
         # Calculate loss
         loss = criterion(scores, targets)
@@ -186,21 +213,23 @@ def train(train_loader, encoder, decoder, criterion, encoder_optimizer, decoder_
         loss += alpha_c * ((1. - alphas.sum(dim=1)) ** 2).mean()
 
         # Back prop.
-        decoder_optimizer.zero_grad()
+        #decoder_optimizer.zero_grad()
         if encoder_optimizer is not None:
             encoder_optimizer.zero_grad()
         loss.backward()
 
         # Clip gradients
         if grad_clip is not None:
-            clip_gradient(decoder_optimizer, grad_clip)
+            #clip_gradient(decoder_optimizer, grad_clip)
             if encoder_optimizer is not None:
                 clip_gradient(encoder_optimizer, grad_clip)
 
         # Update weights
-        decoder_optimizer.step()
+        #decoder_optimizer.step()
         if encoder_optimizer is not None:
             encoder_optimizer.step()
+
+        prune_my_encoder(encoder)
 
         # Keep track of metrics
         top5 = accuracy(scores, targets, 5)
@@ -220,7 +249,9 @@ def train(train_loader, encoder, decoder, criterion, encoder_optimizer, decoder_
                                                                           batch_time=batch_time,
                                                                           data_time=data_time, loss=losses,
                                                                           top5=top5accs))
-
+            if i % (20*print_freq) == 0:
+                torch.save(encoder,'./TrainedEncoder/PrunedEncoder_' + str(i) + '.pth')
+                adjust_learning_rate(encoder_optimizer, 0.7)  # i added
 
 def validate(val_loader, encoder, decoder, criterion):
     """
@@ -267,8 +298,8 @@ def validate(val_loader, encoder, decoder, criterion):
             # Remove timesteps that we didn't decode at, or are pads
             # pack_padded_sequence is an easy trick to do this
             scores_copy = scores.clone()
-            scores, _ = pack_padded_sequence(scores, decode_lengths, batch_first=True)
-            targets, _ = pack_padded_sequence(targets, decode_lengths, batch_first=True)
+            scores, *_ = pack_padded_sequence(scores, decode_lengths, batch_first=True)
+            targets, *_ = pack_padded_sequence(targets, decode_lengths, batch_first=True)
 
             # Calculate loss
             loss = criterion(scores, targets)

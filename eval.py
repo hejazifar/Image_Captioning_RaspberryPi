@@ -7,21 +7,87 @@ from utils import *
 from nltk.translate.bleu_score import corpus_bleu
 import torch.nn.functional as F
 from tqdm import tqdm
+import torchvision.models as models
+
+# ENCODER CLASS
+class Encoder(torch.nn.Module):
+    """
+    Encoder.
+    """
+
+    def __init__(self, encoded_image_size=14):
+        super(Encoder, self).__init__()
+        self.enc_image_size = encoded_image_size
+
+        #resnet = torchvision.models.resnet101(pretrained=True)  # pretrained ImageNet ResNet-101
+        resnet = models.resnet101()
+        #resnet = RQuant.resnet101()
+        #resnet.load_state_dict(torch.load("resnet101-2.pth"))
+
+        # Remove linear and pool layers (since we're not doing classification)
+        modules = list(resnet.children())[:-2]
+        self.resnet = torch.nn.Sequential(*modules)
+
+        # Resize image to fixed size to allow input images of variable size
+        self.adaptive_pool = torch.nn.AdaptiveAvgPool2d((encoded_image_size, encoded_image_size))
+
+        self.fine_tune()
+        #self.qconfig = quantization.get_default_qconfig('qnnpack')
+        # set the qengine to control weight packing
+        #torch.backends.quantized.engine = 'qnnpack'
+        #self.quant = quantization.QuantStub()
+        #self.dequant = quantization.DeQuantStub()
+
+    def forward(self, images):
+        """
+        Forward propagation.
+
+        :param images: images, a tensor of dimensions (batch_size, 3, image_size, image_size)
+        :return: encoded images
+        """
+#        images = self.quant(images)
+        out = self.resnet(images)  # (batch_size, 2048, image_size/32, image_size/32)
+#        out = self.dequant(out)
+        out = self.adaptive_pool(out)  # (batch_size, 2048, encoded_image_size, encoded_image_size)
+        out = out.permute(0, 2, 3, 1)  # (batch_size, encoded_image_size, encoded_image_size, 2048)
+#         out = quantization.DeQuantStub(out)
+        return out
+
+    def fine_tune(self, fine_tune=True):
+        """
+        Allow or prevent the computation of gradients for convolutional blocks 2 through 4 of the encoder.
+
+        :param fine_tune: Allow?
+        """
+        for p in self.resnet.parameters():
+            p.requires_grad = False
+        # If fine-tuning, only fine-tune convolutional blocks 2 through 4
+        for c in list(self.resnet.children())[5:]:
+            for p in c.parameters():
+                p.requires_grad = fine_tune
 
 # Parameters
-data_folder = '/media/ssd/caption data'  # folder with data files saved by create_input_files.py
+data_folder = './Dataset/Output/'  # folder with data files saved by create_input_files.py
 data_name = 'coco_5_cap_per_img_5_min_word_freq'  # base name shared by data files
-checkpoint = '../BEST_checkpoint_coco_5_cap_per_img_5_min_word_freq.pth.tar'  # model checkpoint
-word_map_file = '/media/ssd/caption data/WORDMAP_coco_5_cap_per_img_5_min_word_freq.json'  # word map, ensure it's the same the data was encoded with and the model was trained with
+checkpoint = 'BEST_checkpoint_coco_5_cap_per_img_5_min_word_freq.pth.tar'  # model checkpoint
+word_map_file = './Dataset/Output/WORDMAP_coco_5_cap_per_img_5_min_word_freq.json'  # word map, ensure it's the same the data was encoded with and the model was trained with
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # sets device for model and PyTorch tensors
+#device = "cpu"
 cudnn.benchmark = True  # set to true only if inputs to model are fixed size; otherwise lot of computational overhead
 
 # Load model
 checkpoint = torch.load(checkpoint)
 decoder = checkpoint['decoder']
+#decoder = decoder.to("cpu")
 decoder = decoder.to(device)
 decoder.eval()
-encoder = checkpoint['encoder']
+#decoder = torch.quantization.quantize_dynamic(decoder, {torch.nn.LSTM, torch.nn.Linear}, dtype=torch.qint8)
+#decoder.to(device)
+#decoder.eval()
+#encoder = checkpoint['encoder']
+#encoder = Encoder()
+#encoder = torch.load("./EvaluatedModel/EncoderPrunedForEval.pth")
+encoder = torch.load("./TrainedEncoder/TrainingAttemptDecayingLR/PrunedEncoder_3500.pth")
 encoder = encoder.to(device)
 encoder.eval()
 
@@ -46,7 +112,7 @@ def evaluate(beam_size):
     # DataLoader
     loader = torch.utils.data.DataLoader(
         CaptionDataset(data_folder, data_name, 'TEST', transform=transforms.Compose([normalize])),
-        batch_size=1, shuffle=True, num_workers=1, pin_memory=True)
+        batch_size=1, shuffle=True, num_workers=0, pin_memory=True) # num workers was 1 earlier
 
     # TODO: Batched Beam Search
     # Therefore, do not use a batch_size greater than 1 - IMPORTANT!
@@ -124,6 +190,11 @@ def evaluate(beam_size):
             prev_word_inds = top_k_words / vocab_size  # (s)
             next_word_inds = top_k_words % vocab_size  # (s)
 
+            ###################### i added from caption.py
+            prev_word_inds = prev_word_inds.long()
+            next_word_inds = next_word_inds.long()
+            ######################
+
             # Add new words to sequences
             seqs = torch.cat([seqs[prev_word_inds], next_word_inds.unsqueeze(1)], dim=1)  # (s, step+1)
 
@@ -175,5 +246,5 @@ def evaluate(beam_size):
 
 
 if __name__ == '__main__':
-    beam_size = 1
+    beam_size = 5
     print("\nBLEU-4 score @ beam size of %d is %.4f." % (beam_size, evaluate(beam_size)))
